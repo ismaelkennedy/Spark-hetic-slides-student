@@ -1,5 +1,4 @@
 # Écraser proprement le fichier
-cat > .gitignore << 'EOF'
 .DS_Store
 *.swp
 *.swo
@@ -26,4 +25,3 @@ _SUCCESS
 data/raw/
 data/silver/
 data/gold/
-EOF
