@@ -1,3 +1,5 @@
+# Écraser proprement le fichier
+cat > .gitignore << 'EOF'
 .DS_Store
 *.swp
 *.swo
@@ -8,8 +10,10 @@ __pycache__/
 .venv/
 venv/
 .ipynb_checkpoints/
+
 # Donnees open data telechargees (volumineuses, ne pas committer)
 data/datasets/
+
 # Sorties Spark generees par les TP et le projet
 spark-warehouse/
 metastore_db/
@@ -17,3 +21,9 @@ derby.log
 output/
 *.crc
 _SUCCESS
+
+# Projet MovieLens — couches silver et gold
+data/raw/
+data/silver/
+data/gold/
+EOF
