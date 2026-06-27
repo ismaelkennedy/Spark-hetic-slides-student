@@ -85,9 +85,51 @@ def transformation_et_analyses(spark, movies):
     """Étape 2 : 3 analyses depuis la silver."""
 
     df = spark.read.parquet(SORTIE_SILVER)
+    df = df.cache()
+    df.count()
 
-    # TODO  : analyses 1, 2, 3
-    raise NotImplementedError("TODO analyses")
+    # --- Analyse 1 : films les mieux notés (agrégation) ---
+    analyse_1 = (
+        df.groupBy("movieId")
+        .agg(
+            F.avg("rating").alias("note_moyenne"),
+            F.count("rating").alias("nb_votes"),
+        )
+        .filter(F.col("nb_votes") >= 50)
+        .orderBy(F.desc("note_moyenne"))
+    )
+    print("=== Analyse 1 — Top films (min 50 votes) ===")
+    analyse_1.show(10)
+
+    # --- Analyse 2 : jointure ratings + movies (broadcast) ---
+    analyse_2 = (
+        df.join(F.broadcast(movies), on="movieId", how="inner")
+        .groupBy("movieId", "title", "genres")
+        .agg(
+            F.avg("rating").alias("note_moyenne"),
+            F.count("rating").alias("nb_votes"),
+        )
+        .filter(F.col("nb_votes") >= 50)
+        .orderBy(F.desc("note_moyenne"))
+    )
+    print("=== Analyse 2 — Top films avec titres ===")
+    analyse_2.show(10)
+
+    # --- Analyse 3 : classement par genre (window function) ---
+    df_genres = analyse_2.withColumn(
+        "genre", F.explode(F.split(F.col("genres"), "\\|"))
+    )
+    fenetre = Window.partitionBy("genre").orderBy(F.desc("note_moyenne"))
+    analyse_3 = (
+        df_genres.withColumn("rang", F.row_number().over(fenetre))
+        .filter(F.col("rang") <= 5)
+        .select("genre", "rang", "title", "note_moyenne", "nb_votes")
+        .orderBy("genre", "rang")
+    )
+    print("=== Analyse 3 — Top 5 par genre ===")
+    analyse_3.show(20)
+
+    return {"analyse_1": analyse_1, "analyse_2": analyse_2, "analyse_3": analyse_3}
 
 
 def ecrire_gold(resultats):
