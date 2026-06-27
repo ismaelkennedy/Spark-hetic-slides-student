@@ -8,6 +8,7 @@ Lancement depuis la racine du projet :
 """
 
 import sys
+import time
 
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, IntegerType, FloatType, LongType, StringType
@@ -48,7 +49,7 @@ def ingestion(spark):
     return ratings, movies
 
 
-def nettoyage(ratings, movies):
+def nettoyage(ratings):
     """Étape 1b : nettoyer les données (bronze -> silver)."""
 
     avant = ratings.count()
@@ -132,6 +133,53 @@ def transformation_et_analyses(spark, movies):
     return {"analyse_1": analyse_1, "analyse_2": analyse_2, "analyse_3": analyse_3}
 
 
+def mesure_optimisation(spark, movies):
+    """Étape 3a : mesurer l'effet du broadcast join (avant/après)."""
+
+    df = spark.read.parquet(SORTIE_SILVER)
+
+    # Sans broadcast — Spark fait un sort-merge join avec shuffle
+    t0 = time.time()
+    df.join(movies, on="movieId", how="inner") \
+      .groupBy("movieId").agg(F.count("rating")).count()
+    t_sans = time.time() - t0
+
+    # Avec broadcast — movies (petit) est envoyé à chaque executor, pas de shuffle
+    t0 = time.time()
+    df.join(F.broadcast(movies), on="movieId", how="inner") \
+      .groupBy("movieId").agg(F.count("rating")).count()
+    t_avec = time.time() - t0
+
+    gain = round((t_sans - t_avec) / t_sans * 100, 1)
+    print("=== Optimisation — Broadcast join ===")
+    print(f"Sans broadcast : {t_sans:.2f}s")
+    print(f"Avec broadcast : {t_avec:.2f}s")
+    print(f"Gain           : {gain} %")
+
+
+def exploration_aqe(spark):
+    """Étape 3b : exploration — effet de l'AQE sur une agrégation."""
+
+    df = spark.read.parquet(SORTIE_SILVER)
+
+    # Sans AQE — Spark utilise les estimations statiques du planificateur
+    spark.conf.set("spark.sql.adaptive.enabled", "false")
+    t0 = time.time()
+    df.groupBy("movieId").agg(F.avg("rating"), F.count("rating")).count()
+    t_sans = time.time() - t0
+
+    # Avec AQE — Spark réoptimise le plan en cours d'exécution selon les stats réelles
+    spark.conf.set("spark.sql.adaptive.enabled", "true")
+    t0 = time.time()
+    df.groupBy("movieId").agg(F.avg("rating"), F.count("rating")).count()
+    t_avec = time.time() - t0
+
+    print("=== Exploration — AQE activé vs désactivé ===")
+    print(f"Sans AQE : {t_sans:.2f}s")
+    print(f"Avec AQE : {t_avec:.2f}s")
+    print(f"Différence : {round(t_sans - t_avec, 2)}s")
+
+
 def ecrire_gold(resultats):
     """Étape 3 : écrire les résultats agrégés."""
     for nom, df in resultats.items():
@@ -145,12 +193,17 @@ def main():
     print("Spark UI : http://localhost:4040")
 
     ratings, movies = ingestion(spark)
-    ratings_clean = nettoyage(ratings, movies)
+    ratings_clean = nettoyage(ratings)
     ecrire_silver(ratings_clean)
 
     resultats = transformation_et_analyses(spark, movies)
     ecrire_gold(resultats)
 
+    # Étape 3 : optimisation mesurée et exploration AQE
+    mesure_optimisation(spark, movies)
+    exploration_aqe(spark)
+
+    # Décommenter pour garder la Spark UI vivante : input("Entrée pour quitter...")
     spark.stop()
 
 
