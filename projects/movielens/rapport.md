@@ -76,73 +76,97 @@ df.groupBy("movieId")
 
 ---
 
-### Analyse 2 - jointure
+### Analyse 2 — Jointure ratings + movies (jointure)
 
-- Question : [...]
-- Code clé :
+- **Question** : Quels sont les films les mieux notés avec leurs titres et genres ?
+- **Code clé** :
 ```python
-[...]
+df.join(F.broadcast(movies), on="movieId", how="inner")
+  .groupBy("movieId", "title", "genres")
+  .agg(F.avg("rating").alias("note_moyenne"), F.count("rating").alias("nb_votes"))
+  .filter(F.col("nb_votes") >= 50)
+  .orderBy(F.desc("note_moyenne"))
 ```
-- Résultat (extrait) :
+- **Résultat** :
 ```
-[...]
++-------+--------------------+--------------------+-----------------+--------+
+|movieId|               title|              genres|     note_moyenne|nb_votes|
++-------+--------------------+--------------------+-----------------+--------+
+|    318|Shawshank Redempt...|         Crime|Drama|4.429022082018927|     317|
+|    858|Godfather, The (1...|         Crime|Drama|        4.2890625|     192|
+|   2959|   Fight Club (1999)|Action|Crime|Drama|4.272935779816514|     218|
++-------+--------------------+--------------------+-----------------+--------+
 ```
-- Lecture métier : [...]
+- **Lecture métier** : Le genre Crime|Drama domine le classement. Le broadcast sur `movies` (9 742 lignes) évite un shuffle réseau coûteux avec `ratings` (100 836 lignes).
 
-### Analyse 3 - window function
+---
 
-- Question : [...]
-- Code clé :
+### Analyse 3 — Classement par genre (window function)
+
+- **Question** : Quel est le top 5 des films par genre ?
+- **Code clé** :
 ```python
-[...]
+df_genres = analyse_2.withColumn("genre", F.explode(F.split(F.col("genres"), "\\|")))
+fenetre = Window.partitionBy("genre").orderBy(F.desc("note_moyenne"))
+df_genres.withColumn("rang", F.row_number().over(fenetre)).filter(F.col("rang") <= 5)
 ```
-- Résultat (extrait) :
+- **Résultat** :
 ```
-[...]
++---------+----+--------------------+------------------+--------+
+|    genre|rang|               title|      note_moyenne|nb_votes|
++---------+----+--------------------+------------------+--------+
+|   Action|   1|   Fight Club (1999)| 4.272935779816514|     218|
+|   Action|   2|Dark Knight, The ...| 4.238255033557047|     149|
+|Animation|   1|Spirited Away (Se...| 4.155172413793103|      87|
+|Animation|   2|  Toy Story 3 (2010)| 4.109090909090909|      55|
++---------+----+--------------------+------------------+--------+
 ```
-- Lecture métier : [...]
+- **Lecture métier** : L'`explode` des genres permet de classer chaque film dans plusieurs catégories. Fight Club domine l'Action, Spirited Away l'Animation. La window function évite une auto-jointure coûteuse.
 
 ---
 
 ## 4. Optimisation
 
-- Optimisation choisie : [broadcast / cache / repartition]
-- Pourquoi : [...]
-- Mesure avant/après ou extrait de plan :
+- **Optimisation choisie** : Broadcast join
+- **Pourquoi** : `movies` est une petite table (9 742 lignes) jointe à `ratings` (100 836 lignes). Sans broadcast, Spark fait un sort-merge join avec shuffle réseau. Avec broadcast, `movies` est envoyé directement à chaque executor.
+- **Mesure avant/après** :
 ```
-avant : [...] s   |   après : [...] s
-(ou extrait de explain() montrant le changement)
+Sans broadcast : 1.05s
+Avec broadcast : 0.56s
+Gain           : 46.2 %
 ```
-- Ce que ça change : [...]
+- **Ce que ça change** : Le shuffle est éliminé côté `movies`. Sur un cluster avec plusieurs nœuds, le gain serait encore plus marqué car le transfert réseau est supprimé.
 
 ---
 
 ## 5. Lecture de la Spark UI
 
-- Job observé : [...]
-- Où se produit le shuffle (`Exchange`) : [...]
-- Nombre de stages et de tasks : [...]
-- Capture(s) : [insérer]
-- Commentaire : [...]
+- **Job observé** : job 53 — `count` qui matérialise le cache (3 stages, 73 tasks)
+- **Où se produit le shuffle** : bloc `Exchange` visible dans le DAG — `ShuffledRowRDD` avant le `WholeStageCodegen`
+- **Nombre de stages** : 1 stage complété + 2 stages skipped (grâce au cache)
+- **Commentaire** : Les 2 stages skipped prouvent que le cache fonctionne — Spark ne relit pas le Parquet silver pour chaque analyse. Le shuffle se produit lors du `groupBy` sur `movieId`.
 
 ---
 
 ## 6. Exploration au-delà du cours
 
-- Piste choisie : [AQE et partitions / skew et salting / UDF vs pandas_udf / table gérée et upsert /
-  spark-submit / pushdown mesuré / benchmark formats / streaming ou MLlib]
-- Question : [...]
-- Protocole (ce qu'on a fait varier, ce qui reste fixe) : [...]
-- Mesures :
+- **Piste choisie** : AQE — Adaptive Query Execution
+- **Question** : L'AQE améliore-t-il les performances d'une agrégation sur MovieLens ?
+- **Protocole** : même agrégation (`groupBy movieId + avg + count`), même données, seul `spark.sql.adaptive.enabled` varie
+- **Mesures** :
 ```
-[...]
+Sans AQE : 0.74s
+Avec AQE : 0.34s
+Différence : 0.4s
 ```
-- Conclusion (même si négative ou contre-intuitive) : [...]
+- **Conclusion** : L'AQE réduit le temps de 54% sur cette agrégation. Il réoptimise le nombre de partitions de shuffle en cours d'exécution selon les stats réelles — sur un petit dataset comme MovieLens small, il réduit les partitions vides et l'overhead associé.
 
 ---
 
 ## 7. Ce qu'on a appris et limites
 
-- Ce qui a marché : [...]
-- Ce qui a bloqué : [...]
-- Ce qu'on ferait avec plus de temps : [...]
+- **Ce qui a marché** : Le broadcast join est l'optimisation la plus visible sur MovieLens, les données étant déjà propres le nettoyage est minimal. L'AQE apporte un gain réel même sur petit volume.
+- **Ce qui a bloqué** : Le paramètre `movies` passé inutilement à `nettoyage()` — corrigé en cours de route. L'import `spark_session` nécessitait d'avoir le fichier en local.
+- **Ce qu'on ferait avec plus de temps** : Tester le modèle ALS (MLlib) pour la recommandation, tester sur `ml-latest` (le dataset complet, 27M notes) pour voir si les gains d'optimisation sont plus marqués.
+
+
